@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import sys
+import signal
 import logging
 import asyncio
 import argparse
+import functools
 import argcomplete
 from .bot import ShoppingBot
 
@@ -47,7 +49,14 @@ class ShoppingBotApp(object):
             logging.error("Illegal argument(s): {0}".format(e))
             raise e
 
+    def _quit(self, signum):
+        logging.info("Shutting down due to signal {}".format(signum))
+        self._loop.stop()
+
     def run_forever(self):
+        self._loop.add_signal_handler( signal.SIGINT
+                                     , functools.partial(self._quit, 'SIGINT')
+                                     )
         self._loop.run_forever()
 
 
