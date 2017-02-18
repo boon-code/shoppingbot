@@ -1,4 +1,5 @@
 import logging
+import inspect
 import asyncio
 import telepot
 from telepot import glance, message_identifier
@@ -14,6 +15,10 @@ from telepot.aio.delegate import ( pave_event_space
                                  , call
                                  , include_callback_query_chat_id
                                  )
+from .store import MemoryStorage as Storage
+
+store = Storage()
+
 
 def kbchoice(choices, prefix='', cls=InlineKeyboardButton):
     """ Generates keyboard buttons
@@ -30,29 +35,82 @@ def kbchoice(choices, prefix='', cls=InlineKeyboardButton):
                      )
                  ] for k,t in choices])
 
-choices = dict()
+
+class Dialog(object):
+    def __init__(self):
+        methods = inspect.getmembers(self, inspect.ismethod)
+        self._states = {k : v for k,v in methods if k.startswith('on_')}
+        self._active = True
+        self._state = self.on_start
+
+    def _getStateName(self, method):
+        for k,v in self._states.items():
+            if method == v:
+                return k
+        raise RuntimeError("State lookup for {:r} failed".format(method))
+
+    def isActive(self):
+        return self._active
+
+    def __call__(self, cid, ):
+        if self._active:
+            next = self._state(*args)
+            if inspect.ismethod(next) and (next in self._states.values()):
+                logging.debug("Switching dialog state {} -> {}".format\
+                        ( self._getStateName(self._state)
+                        , self._getStateName(next)
+                        ))
+                self._state = next
+            elif next in self._states.keys():
+                logging.debug("Switching dialog state {} -> {}".format\
+                        ( self._getStateName(self._state)
+                        , next
+                        ))
+                self._state = self._states[next]
+            elif next is None:
+                logging.debug("Keep state {}".format(self._getStateName(self._state)))
+            else:
+                logging.warning("Illegal return from state {}: {}".format\
+                        ( self._getStateName(self._state)
+                        , next
+                        ))
+        else:
+            logging.warning("Dialog is inactive")
+
+    def close(self, msg, sender, handler):
+        if self._active:
+            self.on_close(msg, sender, handler)
+            self._active = False
+
+    def on_start(self, *args):
+        pass
+
+    def on_close(self, *args):
+        pass
+
+
+class AddDialog(Dialog):
+    def on_start(self, msg, sender, handler):
+        pass
+
+    def on_add(self, msg, sender, handler):
+        global store
+        msg['cid']
+
+    def on_close(self, msg, sender, handler):
+        sender.sendMessage("Done \U0001F600")
+
+
+NullDialog = Dialog
+
 
 
 class TestHandler(telepot.aio.helper.ChatHandler):
-    CHOICE = ( ('1', "Tomanten\n")
-             , ('2', "Käse\n")
-             , ('3', "Etwas anderes")
-             , ('4', "noch mehr")
-             , ('5', "nochviel mehr1")
-             , ('6', "nochviel mehr2")
-             , ('7', "nochviel mehr3")
-             , ('8', "nochviel mehr4")
-             , ('9', "nochviel mehr5")
-             , ('10', "nochviel meh6r")
-             , ('11', "nochviel mehr7")
-             , ('12', "Andere auswahl")
-             , ('13', "ZZZ")
-             , ('14', "Bla")
-             )
     def __init__(self, *args, **kwargs):
         super(TestHandler, self).__init__(*args, **kwargs)
         self._editor = None
         self._log = logging.getLogger('TestHandler')
+        self._dialog = NullDialog()
 
     def _getInlineKeyboardChoice(self, choices):
         keyboard = kbchoice(choices)
@@ -65,23 +123,39 @@ class TestHandler(telepot.aio.helper.ChatHandler):
                                   )
 
     async def on_chat_message(self, msg):
-        global choices
+        global store
         content_type, chat_type, cid = glance(msg)
         if content_type != 'text':
             await self.sender.sendMessage("Unsupported content type: {}".format(content_type))
             return
-        if msg['text'] == '/list':
-            choices[cid] = list(self.CHOICE)
-            self._log.debug("Add choices: {0}".format(choices))
-            ed_obj = await self.sender.sendMessage \
-                    ( 'Choose from list:'
-                    , reply_markup = self._getInlineKeyboardChoice(choices[cid])
-                    , parse_mode = "Markdown"
-                    )
-            kb_id = message_identifier(ed_obj)
-            self._editor = telepot.aio.helper.Editor( self.bot
-                                                    , kb_id
-                                                    )
+        if msg['text'].startswith('/'):  # command
+            self._dialog.close(msg, self.sender, self)
+            if msg['text'] == '/cancel':
+                self._dialog = NullDialog()
+            elif msg['text'] == '/list':
+                l = store.getList()
+                if l:
+                    fmt_l = "\n".join(l)
+                    self.sender.sendMessage \
+                            ("Your shopping list:\n\n{}".format(fmt_l))
+                else:
+                    self.sender.sendMessage("Your shopping list is empty \U0001F600")
+            elif msg['text'] == '/multiadd':
+                self._dialog = AddDialog()
+                self._dialog(msg, self.sender, self)
+        elif self._dialog.isActive():
+            self._dialog(msg, self.sender, self)
+#            choices[cid] = list(self.CHOICE)
+#            self._log.debug("Add choices: {0}".format(choices))
+#            ed_obj = await self.sender.sendMessage \
+#                    ( 'Choose from list:'
+#                    , reply_markup = self._getInlineKeyboardChoice(choices[cid])
+#                    , parse_mode = "Markdown"
+#                    )
+#            kb_id = message_identifier(ed_obj)
+#            self._editor = telepot.aio.helper.Editor( self.bot
+#                                                    , kb_id
+#                                                    )
         else: # ignore
             await self.sender.sendMessage( "?? {text}".format(**msg)
                                          , reply_markup = ReplyKeyboardRemove()
