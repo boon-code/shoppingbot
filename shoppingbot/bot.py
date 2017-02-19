@@ -21,7 +21,12 @@ store = TinyStorage('lists.json')
 
 
 def get_chat_id(msg):
-    return str(msg['chat']['id'])
+    if 'chat' in msg:
+        return str(msg['chat']['id'])
+    elif 'message' in msg:
+        return str(msg['message']['chat']['id'])
+    else:
+        raise KeyError("Missing chat id")
 
 
 class FlexibleIdleEventCoordinator(telepot.aio.helper.IdleEventCoordinator):
@@ -51,7 +56,8 @@ class Dialog(object):
         self.handler = None    # handler available in callback
         self.bot = None
         self.callback = False  # event triggerd from message-callback
-        self.qid = None        # callback query id if callback is True (else None)
+        self.query_id = None   # callback query id if callback is True (else None)
+        self.query_key = None  # callback query data if callback is True (else None)
 
     def delay_once(self, timeout):
         try:
@@ -82,9 +88,10 @@ class Dialog(object):
             self.bot = handler.bot
             self.callback = callback
             if callback:
-                self.qid = glance(msg, flavor='callback_query')[0]
+                self.query_id, _, self.query_key = glance(msg, flavor='callback_query')
             else:
-                self.qid = None
+                self.query_id = None
+                self.query_key = None
             try:
                 next = await self._state(msg)
             except Exception as e:
@@ -143,7 +150,7 @@ class AddItemDialog(Dialog):
     async def on_start(self, msg):
         self._count = 0
         self.delay_once(self.ADD_TIMEOUT)
-        await self.sender.sendMessage("Plase name items to put on the list:")
+        await self.sender.sendMessage("Please name items to put on the list:")
         return self.on_add
 
     async def on_add(self, msg):
@@ -155,8 +162,11 @@ class AddItemDialog(Dialog):
 
     async def on_close(self, *args):
         if self._count > 0:
-            await self.sender.sendMessage("Added {} items\U0001F600".format\
-                            (self._count))
+            text = 'item'
+            if self._count > 1:
+                text = 'items'
+            await self.sender.sendMessage("Added {} {} \U0001F600".format\
+                            (self._count, text))
 
 
 class ShoppingDialog(Dialog):
@@ -168,9 +178,9 @@ class ShoppingDialog(Dialog):
     def _prepare_kb(self):
         global store
         cls = InlineKeyboardButton
-        ikb = list([[cls(text=v, callback_data=str(k))
+        ikb = list([[cls(text=v, callback_data=str(k))]
                      for k,v in store.enum(self.cid)
-                  ]])
+                  ])
         if ikb:
             return InlineKeyboardMarkup(inline_keyboard=ikb)
         else:
@@ -184,7 +194,7 @@ class ShoppingDialog(Dialog):
                     , reply_markup = None
                     )
             self._editor = None
-            await self.close()
+            await self.close(self.handler)
             return None
         self.delay_once(self.SHOP_TIMEOUT)
         ed_obj = await self.sender.sendMessage \
@@ -202,19 +212,23 @@ class ShoppingDialog(Dialog):
         if not self.callback:
             logging.error("ignoring message {0!r}".format(msg))
             return None
-        qid, from_id, key = glance(msg, flavor='callback_query')
-        logging.debug("delete key={0}".format(key))
-        ret, r = store.delItem(self.cid, key)
+        logging.debug("delete key={0}".format(self.query_key))
+        ret, r = store.checkItem(self.cid, self.query_key)
         self.delay_once(self.SHOP_TIMEOUT)
         if r is not None:
             await self.bot.answerCallbackQuery \
-                    ( qid
+                    ( self.query_id
                     , text = "Ticked off {}".format(r['item'])
                     )
         kb = self._prepare_kb()
         await self._editor.editMessageReplyMarkup(reply_markup=kb)
         if kb is None:
-            await self.sender.sendMessage("Done \U0001F600")
+            chk_list = [ "- {0}".format(i) for i in store.getList(self.cid, checked=True)]
+            txt = "Shopping list done\n\n{0}".format("\n".join(chk_list))
+            store.removeChecked(self.cid)
+            await self._editor.editMessageText(text=txt)
+            await self.close(self.handler)
+            return None
 
     async def on_close(self, *args):
         if self._editor is not None:
@@ -230,6 +244,13 @@ class TestHandler(telepot.aio.helper.ChatHandler):
         self._log = logging.getLogger('TestHandler')
         self._dialog = NullDialog()
 
+    def _format_checklist(self, chklst):
+        for id,txt,checked in sorted(chklst, key=lambda x: x[0]):
+            if checked:
+                yield " - [x] {0}".format(txt)
+            else:
+                yield " - [ ] {0}".format(txt)
+
     async def _sendList(self, msg):
         global store
         try:
@@ -238,11 +259,10 @@ class TestHandler(telepot.aio.helper.ChatHandler):
             logging.error("Request seems wrong: {0!r}".format(msg))
             return
         store.dumpAll()
-        l = store.getList(cid)
+        l = list(self._format_checklist(store.getCheckList(cid)))
         if l:
-            fmt_l = "\n".join(["- {}".format(i) for i in l])
             await self.sender.sendMessage \
-                    ("Your shopping list:\n\n{}".format(fmt_l))
+                    ("Your shopping list:\n\n{}".format("\n".join(l)))
         else:
             await self.sender.sendMessage("Your shopping list is empty \U0001F600")
 
@@ -275,7 +295,6 @@ class TestHandler(telepot.aio.helper.ChatHandler):
             logging.warning("Bot ignores message: {text}".format(**msg))
 
     async def on_callback_query(self, msg):
-        qid, from_id, key = glance(msg, flavor='callback_query')
         logging.debug("on_callback_query: {0!s}".format(msg))
         if self._dialog.isActive():
             await self._dialog(msg, self, callback=True)
