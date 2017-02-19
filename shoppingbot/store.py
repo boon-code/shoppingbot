@@ -52,7 +52,7 @@ class TinyStorage(object):
                     self._db.update(dict(checked=1), eids=[eid])
                     logging.debug("Check Item {0!s}".format(r))
                 else:
-                    logging.error("Remove not allowed: cid={0}, r={1!s}".format\
+                    logging.error("Check not allowed: cid={0}, r={1!s}".format\
                             (cid, r))
                     return False, None
             except (KeyError, IndexError):

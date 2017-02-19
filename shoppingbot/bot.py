@@ -220,19 +220,88 @@ class ShoppingDialog(Dialog):
                     ( self.query_id
                     , text = "Ticked off {}".format(r['item'])
                     )
-        kb = self._prepare_kb()
-        await self._editor.editMessageReplyMarkup(reply_markup=kb)
-        if kb is None:
-            chk_list = [ "- {0}".format(i) for i in store.getList(self.cid, checked=True)]
-            txt = "Shopping list done\n\n{0}".format("\n".join(chk_list))
-            store.removeChecked(self.cid)
-            await self._editor.editMessageText(text=txt)
-            await self.close(self.handler)
-            return None
+        if r.get('checked', 0) == 1:
+            logging.debug("Item was already checked -> ignoring")
+        else:  # wasn't already checked
+            kb = self._prepare_kb()
+            await self._editor.editMessageReplyMarkup(reply_markup=kb)
+            if kb is None:
+                chk_list = [ "- {0}".format(i) for i in store.getList(self.cid, checked=True)]
+                txt = "Shopping list done\n\n{0}".format("\n".join(chk_list))
+                store.removeChecked(self.cid)
+                await self._editor.editMessageText(text=txt)
+                self._editor = None
+                await self.close(self.handler)
+        return None
 
     async def on_close(self, *args):
         if self._editor is not None:
             await self._editor.editMessageReplyMarkup(reply_markup=None)
+
+
+class CommandCollection(object):
+    def __init__(self):
+        self._cmds = dict()
+
+    def addSimple(self, cmd, func, help="", prio=0):
+        self._cmds["/{}".format(cmd)] = dict\
+                ( func = func
+                , cmd = cmd
+                , help = help
+                , type = 'function'
+                , priority = prio
+                )
+    def addDialog(self, cmd, dialog_cls, help="", prio=0):
+        self._cmds["/{}".format(cmd)] = dict\
+                ( dialog = dialog_cls
+                , cmd = cmd
+                , help = help
+                , type = 'dialog'
+                , priority = prio
+                )
+    def addNoOperation(self, cmd, help="", prio=0):
+        self._cmds["/{}".format(cmd)] = dict\
+                ( cmd = cmd
+                , help = help
+                , type = 'nop'
+                , priority = prio
+                )
+
+    def _msgToCommand(self, msg, botname=None):
+        cmdtext = msg['text']
+        tmp = cmdtext.split('@', 1)
+        if len(tmp) > 1:
+            if botname is not None:
+                if botname != tmp[1]:
+                    return None
+            else:
+                logging.warning("Not checking botname: {0}".format(cmdtext))
+        return self._cmds.get(tmp[0], None)
+
+    def isCommand(self, msg, botname=None):
+        return self._msgToCommand(msg, botname=botname) is not None
+
+    def _sort_func(self, cmd_obj):
+        return (-cmd_obj.get('priority', 0), cmd_obj.get('cmd', ''))
+
+    def _sorted(self):
+        return [i for i in sorted(self._cmds.values(), key=self._sort_func)]
+
+    def helpText(self, first_line):
+        l = ["/{0} - {1}".format(i['cmd'], i['help']) for i in self._sorted()]
+        return "{0}\n\n{1}".format( first_line
+                                  , "\n".join(l)
+                                  )
+
+    def commandList(self):
+        l = ["{0} - {1}".format(i['cmd'], i['help']) for i in self._sorted()]
+        return "\n".join(l)
+
+    def commands(self):
+        return self._cmds
+
+    def get(self, msg, botname=None):
+        return self._msgToCommand(msg, botname=botname)
 
 
 class TestHandler(telepot.aio.helper.ChatHandler):
@@ -243,6 +312,34 @@ class TestHandler(telepot.aio.helper.ChatHandler):
         self._editor = None
         self._log = logging.getLogger('TestHandler')
         self._dialog = NullDialog()
+        cc = CommandCollection()
+        cc.addSimple( 'list'
+                    , self._sendList
+                    , prio = 1
+                    , help = "Show current shopping list"
+                    )
+        cc.addDialog( 'multiadd'
+                    , AddItemDialog
+                    , prio = 2
+                    , help = "Add multiple items to list"
+                    )
+        cc.addDialog( 'shop'
+                    , ShoppingDialog
+                    , prio = 2
+                    , help = "Start shopping"
+                    )
+        cc.addNoOperation( 'cancel'
+                         , help = "Cancel current operation"
+                         )
+        cc.addSimple( 'help'
+                    , self._sendHelp
+                    , help = "Show help text"
+                    )
+        cc.addSimple( 'cmd'
+                    , self._sendCommandList
+                    , help = "Show command list"
+                    )
+        self._cc = cc
 
     def _format_checklist(self, chklst):
         for id,txt,checked in sorted(chklst, key=lambda x: x[0]):
@@ -266,6 +363,15 @@ class TestHandler(telepot.aio.helper.ChatHandler):
         else:
             await self.sender.sendMessage("Your shopping list is empty \U0001F600")
 
+    async def _sendHelp(self, msg):
+        logging.debug("Bot: {0!r}".format(dir(self.bot)))
+        me = await self.bot.getMe()
+        logging.debug("Bot: {0!r}".format(me))
+        await self.sender.sendMessage(self._cc.helpText("Shopping List Bot"))
+
+    async def _sendCommandList(self, msg):
+        await self.sender.sendMessage(self._cc.commandList())
+
     async def on_chat_message(self, msg):
         content_type, chat_type, cid = glance(msg)
         logging.debug("on_chat_message: {0!s}".format(msg))
@@ -274,21 +380,24 @@ class TestHandler(telepot.aio.helper.ChatHandler):
         if content_type != 'text':
             await self.sender.sendMessage("Unsupported content type: {}".format(content_type))
             return
-        if msg['text'].startswith('/'):  # command
-            await self._dialog.close(self)
-            self._dialog = NullDialog()
-            if msg['text'] == '/cancel':
-                pass
-            elif msg['text'] == '/list':
-                await self._sendList(msg)
-            elif msg['text'] == '/multiadd':
-                self._dialog = AddItemDialog()
-                await self._dialog(msg, self)
-            elif msg['text'] == '/shop':
-                self._dialog = ShoppingDialog()
-                await self._dialog(msg, self)
+        if msg['text'].startswith('/'):
+            botname = await self.bot.getBotName()
+            cmd = self._cc.get(msg, botname=botname)
+            if cmd is not None:
+                await self._dialog.close(self)
+                cmd = self._cc.get(msg)
+                if cmd['type'] == 'function':
+                    self._dialog = NullDialog()
+                    await cmd['func'](msg)
+                elif cmd['type'] == 'dialog':
+                    self._dialog = cmd['dialog']()
+                    await self._dialog(msg, self)
+                elif cmd['type'] == 'nop':
+                    self._dialog = NullDialog()
+                else:
+                    logging.error("Unexpected command type {type}".format(**cmd))
             else:
-                logging.error("Unkown command (ignoring): {text}".format(**msg))
+                logging.debug("Ignoring unknown command {0!s}".format(msg))
         elif self._dialog.isActive():
             await self._dialog(msg, self)
         else: # ignore
@@ -321,6 +430,13 @@ class ShoppingBot(telepot.aio.DelegatorBot):
                          )
                 , ]
                 )
+        self._botname = None
+
+    async def getBotName(self):
+        if self._botname is None:
+            user = await self.getMe()
+            self._botname = user['username']
+        return self._botname
 
     async def _send_welcome(self, seed_tuple):
         chat_id = seed_tuple[1]['chat']['id']
