@@ -1,31 +1,46 @@
+import logging
+from tinydb import TinyDB, Query
 
-class MemoryStorage(object):
 
-    def __init__(self):
-        self._store = dict()
+class TinyStorage(object):
+    def __init__(self, path=None):
+        if path is None:
+            path = "tinydb.json"
+        self._db = db = TinyDB(path)
+        logging.debug("Load DB {}".format(path))
 
     def getList(self, cid):
-        if cid in self._store:
-            l = self._store['cid']
-            return l
-        else:
-            return list()
+        return list([v for k,v in self.enum(cid)])
+
+    def _get_entry(self, cid):
+        if not isinstance(cid, str):
+            raise TypeError("'cid' has invalid type '{0!s}'".format(type(cid)))
+        r = self._db.search( (Query().cid == cid)
+                           & (Query().item.exists())
+                           )
+        return r
 
     def enum(self, cid):
-        if cid in self._store:
-            return enumerate(l)
+        r = self._get_entry(cid)
+        return [(i.eid, i['item']) for i in r]
 
     def addItem(self, cid, item):
-        if cid not in self._store:
-            self._store['cid'] = list()
-        self._store['cid'].append(item)
+        self._db.insert(dict(cid=cid, item=item))
 
-    def delItem(self, cid, index):
-        if cid in self._store:
+    def delItem(self, cid, eid):
+        r = self._db.get(eid=eid)
+        if r is not None:
             try:
-                del self._store[index]
-                return True
-            except IndexError:
-                pass
-        return False
+                if r['cid'] == cid:
+                    self._db.remove(eids=[eid])
+                    logging.debug("Remove Item {0!s}".format(r))
+                else:
+                    logging.error("Remove not allowed: cid={0}, r={1!s}".format\
+                            (cid, r))
+                    return False, None
+            except (KeyError, IndexError):
+                logging.debug("Element {0} already removed".format(eid))
+        return True, r
 
+    def dumpAll(self):
+        logging.debug("Store content: {0!r}".format(self._db.all()))

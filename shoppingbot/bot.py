@@ -15,25 +15,29 @@ from telepot.aio.delegate import ( pave_event_space
                                  , call
                                  , include_callback_query_chat_id
                                  )
-from .store import MemoryStorage as Storage
+from .store import TinyStorage
 
-store = Storage()
+store = TinyStorage('lists.json')
 
 
-def kbchoice(choices, prefix='', cls=InlineKeyboardButton):
-    """ Generates keyboard buttons
+def get_chat_id(msg):
+    return str(msg['chat']['id'])
 
-    :param choices: a list of tuples to generate keyboard buttons from. First
-                    item of each tuple in the list is a key (for processing),
-                    second item is the text to display
-    :param prefix:  optional prefix which will be prepended to every key
-    :param cls:     Button class to use
-    :returns:       A list of `cls` instances
-    """
-    return list([[cls( text=t
-                     , callback_data=prefix + k
-                     )
-                 ] for k,t in choices])
+
+class FlexibleIdleEventCoordinator(telepot.aio.helper.IdleEventCoordinator):
+    def delay_once(self, timeout):
+        try:
+            if self._timeout_event:
+                self._scheduler.cancel(self._timeout_event)
+        except exception.EventNotFound:
+            pass
+        finally:
+            self._timeout_event = self._scheduler.event_later \
+                    ( timeout
+                    , ( '_idle'
+                      , {'seconds': timeout}
+                      )
+                    )
 
 
 class Dialog(object):
@@ -42,6 +46,21 @@ class Dialog(object):
         self._states = {k : v for k,v in methods if k.startswith('on_')}
         self._active = True
         self._state = self.on_start
+        self.cid = None        # current chat id available in callback
+        self.sender = None     # sender available in callback
+        self.handler = None    # handler available in callback
+        self.bot = None
+        self.callback = False  # event triggerd from message-callback
+        self.qid = None        # callback query id if callback is True (else None)
+
+    def delay_once(self, timeout):
+        try:
+            self.handler._idle_event_coordinator.delay_once(timeout)
+            logging.debug("Delaying timeout {0!r}: {1}".format( self.handler
+                                                              ,timeout
+                                                              ))
+        except AttributeError:
+            logging.debug("Delaying timeout is not supported by handler {0!r}".format(self.handler))
 
     def _getStateName(self, method):
         for k,v in self._states.items():
@@ -52,10 +71,30 @@ class Dialog(object):
     def isActive(self):
         return self._active
 
-    def __call__(self, cid, ):
+    async def __call__(self, msg, handler, callback=False):
         if self._active:
-            next = self._state(*args)
-            if inspect.ismethod(next) and (next in self._states.values()):
+            try:
+                self.cid = get_chat_id(msg)
+            except KeyError:
+                logging.debug("Couldn't get cid; keep old {}".format(self.cid))
+            self.handler = handler
+            self.sender = handler.sender
+            self.bot = handler.bot
+            self.callback = callback
+            if callback:
+                self.qid = glance(msg, flavor='callback_query')[0]
+            else:
+                self.qid = None
+            try:
+                next = await self._state(msg)
+            except Exception as e:
+                import traceback
+                logging.error("Dialog call failed: {}".format\
+                        (traceback.format_exc()))
+                next = None
+            if next is None:
+                logging.debug("Keep state {}".format(self._getStateName(self._state)))
+            elif inspect.ismethod(next) and (next in self._states.values()):
                 logging.debug("Switching dialog state {} -> {}".format\
                         ( self._getStateName(self._state)
                         , self._getStateName(next)
@@ -67,8 +106,6 @@ class Dialog(object):
                         , next
                         ))
                 self._state = self._states[next]
-            elif next is None:
-                logging.debug("Keep state {}".format(self._getStateName(self._state)))
             else:
                 logging.warning("Illegal return from state {}: {}".format\
                         ( self._getStateName(self._state)
@@ -77,118 +114,175 @@ class Dialog(object):
         else:
             logging.warning("Dialog is inactive")
 
-    def close(self, msg, sender, handler):
+    async def close(self, handler):
         if self._active:
-            self.on_close(msg, sender, handler)
+            self._state = self.on_close
+            await self(dict(), handler)
             self._active = False
 
-    def on_start(self, *args):
+    async def on_start(self, *args):
         pass
 
-    def on_close(self, *args):
+    async def on_close(self, *args):
         pass
 
 
-class AddDialog(Dialog):
-    def on_start(self, msg, sender, handler):
-        pass
+class NullDialog(Dialog):
+    def __init__(self):
+        Dialog.__init__(self)
+        self._active = False
 
-    def on_add(self, msg, sender, handler):
+
+class AddItemDialog(Dialog):
+    ADD_TIMEOUT = 60 * 5
+
+    def __init__(self):
+        Dialog.__init__(self)
+        self._count = 0
+
+    async def on_start(self, msg):
+        self._count = 0
+        self.delay_once(self.ADD_TIMEOUT)
+        await self.sender.sendMessage("Plase name items to put on the list:")
+        return self.on_add
+
+    async def on_add(self, msg):
         global store
-        msg['cid']
+        store.addItem(self.cid, msg['text'])
+        self._count += 1
+        self.delay_once(self.ADD_TIMEOUT)
+        await self.sender.sendMessage("Added item {text}".format(**msg))
 
-    def on_close(self, msg, sender, handler):
-        sender.sendMessage("Done \U0001F600")
+    async def on_close(self, *args):
+        if self._count > 0:
+            await self.sender.sendMessage("Added {} items\U0001F600".format\
+                            (self._count))
 
 
-NullDialog = Dialog
+class ShoppingDialog(Dialog):
+    SHOP_TIMEOUT = 60*60 * 2  # 2 hours
+    def __init__(self):
+        Dialog.__init__(self)
+        self._editor = None
 
+    def _prepare_kb(self):
+        global store
+        cls = InlineKeyboardButton
+        ikb = list([[cls(text=v, callback_data=str(k))
+                     for k,v in store.enum(self.cid)
+                  ]])
+        if ikb:
+            return InlineKeyboardMarkup(inline_keyboard=ikb)
+        else:
+            return None
+
+    async def on_start(self, msg):
+        kb = self._prepare_kb()
+        if kb is None:
+            await self.sender.sendMessage \
+                    ( "Your shopping list is already empty"
+                    , reply_markup = None
+                    )
+            self._editor = None
+            await self.close()
+            return None
+        self.delay_once(self.SHOP_TIMEOUT)
+        ed_obj = await self.sender.sendMessage \
+                ( "Your list"
+                , reply_markup = kb
+                )
+        kb_id = message_identifier(ed_obj)
+        self._editor = telepot.aio.helper.Editor( self.bot
+                                                , kb_id
+                                                )
+        return self.on_select
+
+    async def on_select(self, msg):
+        global store
+        if not self.callback:
+            logging.error("ignoring message {0!r}".format(msg))
+            return None
+        qid, from_id, key = glance(msg, flavor='callback_query')
+        logging.debug("delete key={0}".format(key))
+        ret, r = store.delItem(self.cid, key)
+        self.delay_once(self.SHOP_TIMEOUT)
+        if r is not None:
+            await self.bot.answerCallbackQuery \
+                    ( qid
+                    , text = "Ticked off {}".format(r['item'])
+                    )
+        kb = self._prepare_kb()
+        await self._editor.editMessageReplyMarkup(reply_markup=kb)
+        if kb is None:
+            await self.sender.sendMessage("Done \U0001F600")
+
+    async def on_close(self, *args):
+        if self._editor is not None:
+            await self._editor.editMessageReplyMarkup(reply_markup=None)
 
 
 class TestHandler(telepot.aio.helper.ChatHandler):
+    IdleEventCoordinator = FlexibleIdleEventCoordinator
+
     def __init__(self, *args, **kwargs):
         super(TestHandler, self).__init__(*args, **kwargs)
         self._editor = None
         self._log = logging.getLogger('TestHandler')
         self._dialog = NullDialog()
 
-    def _getInlineKeyboardChoice(self, choices):
-        keyboard = kbchoice(choices)
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    def _getKeyboardChoice(self, choices):
-        keyboard = [[KeyboardButton(text=v)] for k,v in choices]
-        return ReplyKeyboardMarkup( keyboard = keyboard
-                                  , selective = True
-                                  )
+    async def _sendList(self, msg):
+        global store
+        try:
+            cid = get_chat_id(msg)
+        except KeyError:
+            logging.error("Request seems wrong: {0!r}".format(msg))
+            return
+        store.dumpAll()
+        l = store.getList(cid)
+        if l:
+            fmt_l = "\n".join(["- {}".format(i) for i in l])
+            await self.sender.sendMessage \
+                    ("Your shopping list:\n\n{}".format(fmt_l))
+        else:
+            await self.sender.sendMessage("Your shopping list is empty \U0001F600")
 
     async def on_chat_message(self, msg):
-        global store
         content_type, chat_type, cid = glance(msg)
+        logging.debug("on_chat_message: {0!s}".format(msg))
+        if content_type == 'new_chat_member':
+            return  # ignore
         if content_type != 'text':
             await self.sender.sendMessage("Unsupported content type: {}".format(content_type))
             return
         if msg['text'].startswith('/'):  # command
-            self._dialog.close(msg, self.sender, self)
+            await self._dialog.close(self)
+            self._dialog = NullDialog()
             if msg['text'] == '/cancel':
-                self._dialog = NullDialog()
+                pass
             elif msg['text'] == '/list':
-                l = store.getList()
-                if l:
-                    fmt_l = "\n".join(l)
-                    self.sender.sendMessage \
-                            ("Your shopping list:\n\n{}".format(fmt_l))
-                else:
-                    self.sender.sendMessage("Your shopping list is empty \U0001F600")
+                await self._sendList(msg)
             elif msg['text'] == '/multiadd':
-                self._dialog = AddDialog()
-                self._dialog(msg, self.sender, self)
+                self._dialog = AddItemDialog()
+                await self._dialog(msg, self)
+            elif msg['text'] == '/shop':
+                self._dialog = ShoppingDialog()
+                await self._dialog(msg, self)
+            else:
+                logging.error("Unkown command (ignoring): {text}".format(**msg))
         elif self._dialog.isActive():
-            self._dialog(msg, self.sender, self)
-#            choices[cid] = list(self.CHOICE)
-#            self._log.debug("Add choices: {0}".format(choices))
-#            ed_obj = await self.sender.sendMessage \
-#                    ( 'Choose from list:'
-#                    , reply_markup = self._getInlineKeyboardChoice(choices[cid])
-#                    , parse_mode = "Markdown"
-#                    )
-#            kb_id = message_identifier(ed_obj)
-#            self._editor = telepot.aio.helper.Editor( self.bot
-#                                                    , kb_id
-#                                                    )
+            await self._dialog(msg, self)
         else: # ignore
-            await self.sender.sendMessage( "?? {text}".format(**msg)
-                                         , reply_markup = ReplyKeyboardRemove()
-                                         )
+            logging.warning("Bot ignores message: {text}".format(**msg))
 
     async def on_callback_query(self, msg):
-        global choices
         qid, from_id, key = glance(msg, flavor='callback_query')
-        await self.bot.answerCallbackQuery(qid, text='Your choice: {}'.format(key))
-        opts = choices.get(from_id, list())
-        self._log.debug("Current choices for {0}: {1}".format(from_id, opts))
-        self._log.debug("Shoud delete {0} for {1}".format(key, from_id))
-        if len(opts) > 0:
-            for i,p in enumerate(opts):
-                if p[0] == key:
-                    del choices[from_id][i]
-                    self._log.debug("Delete key: {0}, index={1}".format(key, i))
-                    break
-            opts = choices[from_id]
-            self._log.debug("After removal: {0}".format(opts))
-        if self._editor is not None:
-            if len(opts) > 0:
-                self._log.debug("More options left...")
-                await self._editor.editMessageReplyMarkup\
-                        (reply_markup=self._getInlineKeyboardChoice(opts))
-            else:
-                self._log.debug("No more options")
-                await self._editor.editMessageReplyMarkup(reply_markup=None)
-                await self.sender.sendMessage("Done \U0001F600")
-                self.close()
+        logging.debug("on_callback_query: {0!s}".format(msg))
+        if self._dialog.isActive():
+            await self._dialog(msg, self, callback=True)
 
-    def on_close(self, ex):
-        self._log.debug("Closing TestHandler")
+    async def on_close(self, ex):
+        self._log.debug("Closing TestHandler ...")
+        await self._dialog.close(self)
 
 
 class ShoppingBot(telepot.aio.DelegatorBot):
@@ -204,7 +298,7 @@ class ShoppingBot(telepot.aio.DelegatorBot):
                          ( per_chat_id()
                          , create_open
                          , TestHandler
-                         , timeout = 10
+                         , timeout = 5
                          )
                 , ]
                 )

@@ -30,5 +30,6 @@ setup( name = 'shoppingbot'
              , "argcomplete>=1.4.1"
              , "telepot>=10.4"
              , "blessings>=1.6"
+             , "tinydb>=3.2.2"
              ]
      )
