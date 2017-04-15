@@ -4,13 +4,12 @@ import datetime
 YEAR = datetime.date.today().year
 
 __author__ = "Manuel Huber"
-__version__ = "0.0.0"
 __license__ = "MIT"
 __copyright__ = u'%s, Manuel Huber' % YEAR
 
 
 setup( name = 'shoppingbot'
-     , version = __version__
+     , version_format = "{tag}.{commitcount}+{gitsha}"
      , description = 'Telegram Bot that manages your shopping list'
      , license = __license__
      , author = __author__
@@ -20,6 +19,7 @@ setup( name = 'shoppingbot'
                      , "Programming Language :: Python :: 3 :: Only"
                      , "Topic :: System :: Systems Administration"
                      ]
+     , setup_requires = ["setuptools-git-version"]
      , packages = ['shoppingbot']
      , entry_points = {
            'console_scripts' :
