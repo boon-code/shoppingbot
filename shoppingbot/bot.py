@@ -239,6 +239,86 @@ class ShoppingDialog(Dialog):
             await self._editor.editMessageReplyMarkup(reply_markup=None)
 
 
+class SwapDialog(Dialog):
+    SWAP_TIMEOUT = 5 * 60
+    def __init__(self):
+        Dialog.__init__(self)
+        self._editor = None
+        self._key = [None, None]
+
+    def _prepare_kb(self, exclude=tuple()):
+        global store
+        cls = InlineKeyboardButton
+        ikb = list()
+        for k,v in store.enum(self.cid):
+            if k not in exclude:
+                ikb.append([cls(text=v, callback_data=str(k))])
+        if ikb:
+            return InlineKeyboardMarkup(inline_keyboard=ikb)
+        else:
+            return None
+
+    async def on_start(self, msg):
+        kb = self._prepare_kb()
+        if kb is None:
+            await self.sender.sendMessage \
+                    ( "Your shopping list is already empty"
+                    , reply_markup = None
+                    )
+            self._editor = None
+            await self.close(self.handler)
+            return None
+        self.delay_once(self.SWAP_TIMEOUT)
+        ed_obj = await self.sender.sendMessage \
+                ( "Your list to swap"
+                , reply_markup = kb
+                )
+        kb_id = message_identifier(ed_obj)
+        self._editor = telepot.aio.helper.Editor( self.bot
+                                                , kb_id
+                                                )
+        return self.on_select_1
+
+    async def on_select_1(self, msg):
+        global store
+        if not self.callback:
+            logging.error("ignoring message {0!r}".format(msg))
+            return None
+        logging.debug("select first: {0}".format(self.query_key))
+        self._key[0] = int(self.query_key)
+        await self.bot.answerCallbackQuery \
+                ( self.query_id
+                , text = "Select {0}".format(self._key[0])
+                )
+        kb = self._prepare_kb(exclude=(self._key[0],))
+        logging.debug("kb: {0}".format(kb))
+        await self._editor.editMessageReplyMarkup(reply_markup=kb)
+        return self.on_select_2
+
+    async def on_select_2(self, msg):
+        global store
+        if not self.callback:
+            logging.error("ignoring message {0!r}".format(msg))
+            return None
+        logging.debug("select second: {0}".format(self.query_key))
+        self._key[1] = int(self.query_key)
+        if (self._key[0] == self._key[1]) or (None in self._key):
+            await self.bot.answerCallbackQuery \
+                    ( self.query_id
+                    , text = "Abort swap command"
+                    )
+        else:
+            logging.debug("Swapping {0} and {1}".format(*self._key))
+            await self.bot.answerCallbackQuery \
+                    ( self.query_id
+                    , text = "Swap {0} and {1}".format(*self._key)
+                    )
+        store.swapItems(self.cid, self._key[0], self._key[1])
+        kb = self._prepare_kb()
+        await self._editor.editMessageReplyMarkup(reply_markup=kb)
+        return self.on_select_1
+
+
 class CommandCollection(object):
     def __init__(self):
         self._cmds = dict()
@@ -331,6 +411,11 @@ class TestHandler(telepot.aio.helper.ChatHandler):
         cc.addNoOperation( 'cancel'
                          , help = "Cancel current operation"
                          )
+        cc.addDialog( 'swap'
+                    , SwapDialog
+                    , prio = 1
+                    , help = "Swap items on list"
+                    )
         cc.addSimple( 'help'
                     , self._sendHelp
                     , help = "Show help text"

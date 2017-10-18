@@ -39,6 +39,19 @@ class TinyStorage(object):
         r = self._get_entry(cid, checked=checked)
         return [(i.eid, i['item']) for i in r]
 
+    def swapItems(self, cid, eid_a, eid_b):
+        eid_a = int(eid_a)
+        eid_b = int(eid_b)
+        a = self._db.get(eid=eid_a)
+        b = self._db.get(eid=eid_b)
+        if (a['cid'] != cid) or (b['cid'] != cid):
+            raise RuntimeError("Invalid items selected")
+        logging.debug("A: {0}".format(a))
+        logging.debug("B: {0}".format(b))
+        # HACK: override old item to 'fake' swapping
+        self._db.update(a, eids=[eid_b])
+        self._db.update(b, eids=[eid_a])
+
     def addItem(self, cid, item):
         self._db.insert(dict(cid=cid, item=item))
 
