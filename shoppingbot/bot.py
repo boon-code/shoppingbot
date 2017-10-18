@@ -284,6 +284,7 @@ class SwapDialog(Dialog):
         if not self.callback:
             logging.error("ignoring message {0!r}".format(msg))
             return None
+        self.delay_once(self.SWAP_TIMEOUT)
         logging.debug("select first: {0}".format(self.query_key))
         self._key[0] = int(self.query_key)
         await self.bot.answerCallbackQuery \
@@ -300,6 +301,7 @@ class SwapDialog(Dialog):
         if not self.callback:
             logging.error("ignoring message {0!r}".format(msg))
             return None
+        self.delay_once(self.SWAP_TIMEOUT)
         logging.debug("select second: {0}".format(self.query_key))
         self._key[1] = int(self.query_key)
         if (self._key[0] == self._key[1]) or (None in self._key):
