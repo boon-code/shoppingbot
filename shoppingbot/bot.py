@@ -411,6 +411,7 @@ class TestHandler(telepot.aio.helper.ChatHandler):
                     , help = "Start shopping"
                     )
         cc.addNoOperation( 'cancel'
+                         , prio = 1
                          , help = "Cancel current operation"
                          )
         cc.addDialog( 'swap'
@@ -444,7 +445,7 @@ class TestHandler(telepot.aio.helper.ChatHandler):
         try:
             cid = get_chat_id(msg)
         except KeyError:
-            logging.error("Request seems wrong: {0!r}".format(msg))
+            logging.exception("Request seems wrong: {0!r}".format(msg))
             return
         store.dumpAll()
         l = list(self._format_checklist(store.getCheckList(cid)))
