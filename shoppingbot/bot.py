@@ -418,6 +418,10 @@ class TestHandler(telepot.aio.helper.ChatHandler):
                     , prio = 1
                     , help = "Swap items on list"
                     )
+        cc.addSimple( 'cleanup'
+                    , self._cleanupList
+                    , help = "Remove checked items from list"
+                    )
         cc.addSimple( 'help'
                     , self._sendHelp
                     , help = "Show help text"
@@ -449,6 +453,17 @@ class TestHandler(telepot.aio.helper.ChatHandler):
                     ("Your shopping list:\n\n{}".format("\n".join(l)))
         else:
             await self.sender.sendMessage("Your shopping list is empty \U0001F600")
+
+    async def _cleanupList(self, msg):
+        global store
+        try:
+            cid = get_chat_id(msg)
+        except KeyError:
+            logging.exception("Request seems wrong: {0!r}".format(msg))
+            return
+        store.removeChecked(cid)
+        await self.sender.sendMessage \
+                ("Cleaned up your shopping list")
 
     async def _sendHelp(self, msg):
         logging.debug("Bot: {0!r}".format(dir(self.bot)))
