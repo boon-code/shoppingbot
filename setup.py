@@ -8,10 +8,10 @@ __author__ = "Manuel Huber"
 __license__ = "MIT"
 __copyright__ = u'%s, Manuel Huber' % YEAR
 
-install_requires = [ "argcomplete>=1.4.1"
-                   , "telepot>=10.4"
-                   , "blessings>=1.6"
-                   , "tinydb>=3.2.2"
+install_requires = [ "argcomplete>=1.4.1,<2.0.0"
+                   , "telepot>=10.4,<13.0"
+                   , "blessings>=1.6,<2.0"
+                   , "tinydb>=3.2.2,<4.0.0"
                    ]
 
 if sys.version_info < (2, 7):
