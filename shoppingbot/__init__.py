@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import os
 import signal
 import logging
 import asyncio
@@ -22,10 +23,23 @@ class ShoppingBotApp(object):
         args = self._parseArguments(args)
         logging.getLogger().setLevel(args.verbosity)
         logging.info("Shopping List Bot is starting up")
-        self._bot = ShoppingBot(args.token)
+        token = self._get_token(args.token)
+        self._bot = ShoppingBot(token)
         self._loop = asyncio.get_event_loop()
         self._loop.create_task(self._bot.message_loop())
         logging.debug("Listening for events")
+
+    def _get_token(self, token_or_file):
+        try:
+            if os.path.exists(token_or_file):
+                with open(token_or_file, 'r') as f:
+                    token = f.read().strip('\n\r')
+                    logging.debug("Read token from file %s", token_or_file)
+                    return token
+        except Exception as e:
+            logging.exception("Failed to read parameter token as file")
+        logging.debug("Using token from the command line")
+        return token_or_file # assume it is a token
 
     def _parseArguments(self, args):
         parser = argparse.ArgumentParser()
@@ -39,7 +53,7 @@ class ShoppingBotApp(object):
                            , action = 'store_const'
                            , const = logging.ERROR
                            )
-        parser.add_argument('token')
+        parser.add_argument('token', help="Token or path to the file containing the token")
         parser.set_defaults(verbosity=logging.INFO)
         try:
             args = parser.parse_args(args)
