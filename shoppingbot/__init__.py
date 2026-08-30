@@ -28,11 +28,13 @@ class ShoppingBotApp:
 
         logging.info("Shopping List Bot is starting up")
 
-        token = self._get_token(args.token)
-        self._bot = ShoppingBot(token)
+        self._token = self._get_token(args.token)
 
-        self._shutdown_event = asyncio.Event()
+        # Don't create asyncio objects or the bot here.
+        # asyncio.run() hasn't created the event loop yet.
+        self._bot = None
         self._bot_task = None
+        self._shutdown_event = None
 
     def _get_token(self, token_or_file):
         try:
@@ -45,7 +47,7 @@ class ShoppingBotApp:
             logging.exception("Failed to read parameter token as file")
 
         logging.debug("Using token from the command line")
-        return token_or_file  # assume it is a token
+        return token_or_file
 
     def _parseArguments(self, args):
         parser = argparse.ArgumentParser()
@@ -56,12 +58,14 @@ class ShoppingBotApp:
             action="store_const",
             const=logging.DEBUG,
         )
+
         parser.add_argument(
             "--quiet",
             dest="verbosity",
             action="store_const",
             const=logging.ERROR,
         )
+
         parser.add_argument(
             "token",
             help="Token or path to the file containing the token",
@@ -69,21 +73,28 @@ class ShoppingBotApp:
 
         parser.set_defaults(verbosity=logging.INFO)
 
-        try:
-            argcomplete.autocomplete(parser)
-            return parser.parse_args(args)
-        except argparse.ArgumentError as e:
-            logging.error("Illegal argument(s): %s", e)
-            raise
+        argcomplete.autocomplete(parser)
+
+        return parser.parse_args(args)
 
     def _quit(self, signum):
         logging.info("Shutting down due to signal %s", signum)
-        self._shutdown_event.set()
+
+        # This is now created inside the same loop as run().
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()
 
     async def run(self):
+        # Everything below this point runs inside the event loop
+        # created by asyncio.run().
+
         loop = asyncio.get_running_loop()
 
-        # Signal handlers are only available on Unix event loops.
+        self._shutdown_event = asyncio.Event()
+
+        # Create the bot here, NOT in __init__.
+        self._bot = ShoppingBot(self._token)
+
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(
@@ -92,7 +103,8 @@ class ShoppingBotApp:
                     sig.name,
                 )
             except NotImplementedError:
-                # Windows' default event loop may not support this.
+                # Signal handlers aren't supported by all event loops
+                # (notably some Windows configurations).
                 pass
 
         self._bot_task = asyncio.create_task(
@@ -104,10 +116,11 @@ class ShoppingBotApp:
 
         try:
             await self._shutdown_event.wait()
+
         finally:
             logging.info("Stopping shopping bot")
 
-            if self._bot_task and not self._bot_task.done():
+            if self._bot_task is not None:
                 self._bot_task.cancel()
 
                 try:
